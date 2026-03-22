@@ -1,130 +1,214 @@
-#!/usr/bin/env python
-# coding: utf-8
-# Author: MaDyEl
-# Professional Load Testing Tool
+#!/usr/bin/env python3
+"""Professional Load Testing Tool."""
 
-import socket
-import threading
-import time
+# Author: MaDyEl
+
+import argparse
+import logging
 import random
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import urlparse
+
+import requests
 from fake_useragent import UserAgent
 
 BANNER = r"""
-  _______  _______  ______            _______  _       
-(       )(  ___  )(  __  \ |\     /|(  ____ \( \      
-| () () || (   ) || (  \  )( \   / )| (    \/| (      
-| || || || (___) || |   ) | \ (_) / | (__    | |      
-| |(_)| ||  ___  || |   | |  \   /  |  __)   | |      
-| |   | || (   ) || |   ) |   ) (   | (      | |      
+  _______  _______  ______            _______  _
+(       )(  ___  )(  __  \ |\     /|(  ____ \( \
+| () () || (   ) || (  \  )( \   / )| (    \/| (
+| || || || (___) || |   ) | \ (_) / | (__    | |
+| |(_)| ||  ___  || |   | |  \   /  |  __)   | |
+| |   | || (   ) || |   ) |   ) (   | (      | |
 | )   ( || )   ( || (__/  )   | |   | (____/\| (____/\
 |/     \||/     \|(______/    \_/   (_______/(_______/
-                                                      
 """
 
-def load_proxies_from_file(filename="proxy.txt"):
-    """Load proxies from file (format: ip:port)"""
+MAX_THREADS = 100
+MAX_REQUESTS_PER_THREAD = 10
+REQUEST_TIMEOUT = 10
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(asctime)s] %(levelname)s %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+
+
+def load_proxies(filename: str = "proxy.txt") -> list[str]:
+    """Load proxies from file (format: ip:port)."""
     try:
-        with open(filename, "r") as f:
-            return [line.strip() for line in f if line.strip()]
+        with open(filename) as f:
+            proxies = [line.strip() for line in f if line.strip()]
+        logger.info("Loaded %d proxies from %s", len(proxies), filename)
+        return proxies
     except FileNotFoundError:
-        print(f"[!] File {filename} not found. Create one with authorized proxy addresses.")
+        logger.warning("Proxy file '%s' not found.", filename)
         return []
 
-class LoadTester(threading.Thread):
-    def __init__(self, target_url, proxies, thread_id, requests_per_thread=1):
-        threading.Thread.__init__(self)
-        self.target_url = target_url
-        self.proxies = proxies
-        self.thread_id = thread_id
-        self.requests_per_thread = requests_per_thread
-        self.user_agent = UserAgent().random
-        self.running = True
 
-    def stop(self):
-        self.running = False
-
-    def create_request(self):
-        host = self.target_url.replace("http://", "").replace("https://", "").split('/')[0]
-        return (
-            f"GET {self.target_url} HTTP/1.1\r\n"
-            f"Host: {host}\r\n"
-            f"User-Agent: {self.user_agent}\r\n"
-            "Connection: close\r\n\r\n"
+def send_request(url: str, proxy: str | None, ua: UserAgent) -> dict:
+    """Send a single HTTP request and return result stats."""
+    headers = {"User-Agent": ua.random}
+    proxies = {"http": f"http://{proxy}", "https": f"http://{proxy}"} if proxy else None
+    try:
+        resp = requests.get(
+            url, headers=headers, proxies=proxies, timeout=REQUEST_TIMEOUT
         )
+        return {"status": resp.status_code, "size": len(resp.content), "error": None}
+    except requests.exceptions.RequestException as exc:
+        return {"status": None, "size": 0, "error": str(exc)}
 
-    def run(self):
-        proxy = random.choice(self.proxies) if self.proxies else None
-        request = self.create_request()
 
-        for _ in range(self.requests_per_thread):
-            if not self.running:
-                break
+def worker(
+    thread_id: int,
+    url: str,
+    proxies: list[str],
+    requests_count: int,
+    ua: UserAgent,
+) -> dict[str, int]:
+    """Run all requests for a single worker thread."""
+    proxy = random.choice(proxies) if proxies else None
+    stats: dict[str, int] = {"success": 0, "errors": 0}
 
-            try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.settimeout(5)
+    for _ in range(requests_count):
+        if proxy:
+            logger.debug("[Thread %d] Using proxy: %s", thread_id, proxy)
 
-                if proxy:
-                    proxy_host, proxy_port = proxy.split(':')
-                    print(f"[Thread {self.thread_id}] Using proxy: {proxy}")
-                    s.connect((proxy_host, int(proxy_port)))
-                else:
-                    s.connect((socket.gethostbyname(self.target_url), 80))
+        result = send_request(url, proxy, ua)
 
-                s.send(request.encode())
-                response = s.recv(1024)
-                print(f"[Thread {self.thread_id}] Response: {response[:100]}...")
-                s.close()
+        if result["error"]:
+            logger.warning("[Thread %d] Error: %s", thread_id, result["error"])
+            stats["errors"] += 1
+        else:
+            logger.info(
+                "[Thread %d] %s -> HTTP %d (%d bytes)",
+                thread_id,
+                url,
+                result["status"],
+                result["size"],
+            )
+            stats["success"] += 1
 
-            except Exception as e:
-                print(f"[Thread {self.thread_id}] Error: {str(e)}")
-            finally:
-                time.sleep(random.uniform(0.1, 1.0))  # Realistic throttling
+        time.sleep(random.uniform(0.1, 1.0))  # Realistic throttling
 
-def main():
+    return stats
+
+
+def run_test(
+    url: str,
+    num_threads: int,
+    requests_per_thread: int,
+    proxies: list[str],
+) -> None:
+    """Run the load test with the given configuration."""
+    ua = UserAgent()
+    total_success = 0
+    total_errors = 0
+
+    logger.info(
+        "Starting test on %s with %d threads (%d requests each)",
+        url,
+        num_threads,
+        requests_per_thread,
+    )
+
+    with ThreadPoolExecutor(max_workers=num_threads) as executor:
+        futures = {
+            executor.submit(worker, i, url, proxies, requests_per_thread, ua): i
+            for i in range(num_threads)
+        }
+        try:
+            for future in as_completed(futures):
+                stats = future.result()
+                total_success += stats["success"]
+                total_errors += stats["errors"]
+        except KeyboardInterrupt:
+            logger.info("Test interrupted by user.")
+            executor.shutdown(wait=False, cancel_futures=True)
+
+    logger.info(
+        "Test completed — Success: %d | Errors: %d", total_success, total_errors
+    )
+
+
+def _prompt_int(prompt: str, default: int, lo: int, hi: int) -> int:
+    try:
+        return max(lo, min(int(input(prompt)), hi))
+    except ValueError:
+        return default
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Professional Load Testing Tool")
+    parser.add_argument("--url", help="Target URL")
+    parser.add_argument(
+        "--threads",
+        type=int,
+        help=f"Number of threads (1-{MAX_THREADS})",
+    )
+    parser.add_argument(
+        "--requests",
+        type=int,
+        dest="requests_per_thread",
+        help=f"Requests per thread (1-{MAX_REQUESTS_PER_THREAD})",
+    )
+    parser.add_argument(
+        "--proxies",
+        action="store_true",
+        help="Load proxies from proxy file",
+    )
+    parser.add_argument(
+        "--proxy-file",
+        default="proxy.txt",
+        help="Path to proxy file (default: proxy.txt)",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
     print(BANNER)
     print("Professional Load Testing Tool")
     print("Use only on authorized systems!\n")
 
-    # Configuration
-    target_url = input("Enter target URL (e.g., http://example.com): ").strip()
-    if not target_url.startswith(('http://', 'https://')):
-        target_url = 'http://' + target_url
+    args = parse_args()
 
-    try:
-        num_threads = int(input("Threads (1-100): "))
-        num_threads = max(1, min(num_threads, 100))  # Safety limit
-    except ValueError:
-        num_threads = 10
+    url = args.url or input("Enter target URL (e.g., http://example.com): ").strip()
+    if not url.startswith(("http://", "https://")):
+        url = "http://" + url
 
-    try:
-        requests_per_thread = int(input("Requests per thread (1-10): "))
-        requests_per_thread = max(1, min(requests_per_thread, 10))
-    except ValueError:
-        requests_per_thread = 1
+    parsed = urlparse(url)
+    if not parsed.netloc:
+        logger.error("Invalid URL: %s", url)
+        sys.exit(1)
 
-    # Proxy configuration (optional)
-    use_proxies = input("Use proxies? (y/n): ").lower() == 'y'
-    proxies = load_proxies_from_file() if use_proxies else []
+    if args.threads is not None:
+        num_threads = max(1, min(args.threads, MAX_THREADS))
+    else:
+        num_threads = _prompt_int(
+            f"Threads (1-{MAX_THREADS}): ", 10, 1, MAX_THREADS
+        )
 
-    # Start test
-    print(f"\nStarting test on {target_url} with {num_threads} threads...")
-    threads = []
-    try:
-        for i in range(num_threads):
-            t = LoadTester(target_url, proxies, i, requests_per_thread)
-            t.start()
-            threads.append(t)
-            time.sleep(0.1)  # Stagger thread starts
+    if args.requests_per_thread is not None:
+        requests_per_thread = max(1, min(args.requests_per_thread, MAX_REQUESTS_PER_THREAD))
+    else:
+        requests_per_thread = _prompt_int(
+            f"Requests per thread (1-{MAX_REQUESTS_PER_THREAD}): ",
+            1,
+            1,
+            MAX_REQUESTS_PER_THREAD,
+        )
 
-        input("\nPress Enter to stop test...\n")
-    finally:
-        print("Stopping threads...")
-        for t in threads:
-            t.stop()
-        for t in threads:
-            t.join()
-        print("Test completed.")
+    if args.proxies:
+        proxies = load_proxies(args.proxy_file)
+    else:
+        use_proxies = input("Use proxies? (y/n): ").lower() == "y"
+        proxies = load_proxies(args.proxy_file) if use_proxies else []
+
+    run_test(url, num_threads, requests_per_thread, proxies)
+
 
 if __name__ == "__main__":
     main()

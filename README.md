@@ -1,69 +1,100 @@
 # Professional Load Testing Tool
 
-A Python-based load testing tool designed for **authorized performance testing** of web applications. Simulates HTTP traffic with configurable threads and proxy support.
+A Python load testing tool for **authorized performance testing** of web applications.
+It simulates configurable HTTP traffic using multiple threads and optional proxy support.
 
-**Disclaimer:** Use only on systems you own or have explicit permission to test. Unauthorized use may violate laws and terms of service.
+> **Disclaimer:** Use this tool only on systems you own or have explicit written
+> permission to test. Unauthorized use may violate laws and terms of service.
+
+---
 
 ## Features
 
-- 🚀 Multi-threaded request generation
-- 🔒 Proxy support (via `proxy.txt`)
-- 📊 Basic response monitoring
-- ⏱️ Request throttling for realistic loads
-- 🛑 Safe configuration limits (max 100 threads)
+- Multi-threaded request generation (up to 100 concurrent threads)
+- HTTP and HTTPS support via the `requests` library
+- Optional proxy support (via `proxy.txt`)
+- Structured logging with timestamps
+- Request throttling for realistic load simulation
+- CLI flags for non-interactive automation
+- Safe configuration limits enforced at runtime
+
+## Requirements
+
+- Python 3.10+
+- Dependencies listed in `requirements.txt`
 
 ## Installation
 
-1. Clone the repository:
 ```bash
-   git clone https://github.com/yourusername/load-testing-tool.git
-   cd load-testing-tool
+git clone https://github.com/yourusername/loadTestingTool.git
+cd loadTestingTool
+pip install -r requirements.txt
 ```
-   
-2. Install dependencies:
+
+## Usage
+
+### Interactive mode
+
 ```bash
-    pip install -r requirements.txt
+python start.py
 ```
 
-Usage
-Basic Test
+Follow the prompts to set the target URL, thread count, requests per thread,
+and whether to use proxies.
+
+### CLI mode
+
 ```bash
-python load_tester.py
+python start.py --url http://example.com --threads 20 --requests 5
 ```
 
-Follow the interactive prompts to configure your test.
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--url` | Target URL | prompted |
+| `--threads` | Number of threads (1–100) | prompted |
+| `--requests` | Requests per thread (1–10) | prompted |
+| `--proxies` | Load proxies from proxy file | `false` |
+| `--proxy-file` | Path to proxy file | `proxy.txt` |
 
-Using Proxies
+### Using proxies
 
-    Create proxy.txt with your proxies (one per line):
-    text
+Create a `proxy.txt` file with one proxy per line in `ip:port` format:
 
-    1.2.3.4:8080
-    5.6.7.8:3128
-
-    Enable proxy support when prompted
-
-Sample Output
-```text
-[Thread 5] Using proxy: 1.2.3.4:8080
-[Thread 3] Response: HTTP/1.1 200 OK...
-[Thread 7] Error: Connection timed out
+```
+1.2.3.4:8080
+5.6.7.8:3128
 ```
 
-Ethical Guidelines
+Then run with proxy support:
 
-✅ Allowed Uses
+```bash
+python start.py --url http://example.com --proxies
+```
 
-    Testing your own servers
+## Sample output
 
-    Authorized penetration testing
+```
+[12:34:56] INFO Starting test on http://example.com with 10 threads (5 requests each)
+[12:34:57] INFO [Thread 0] http://example.com -> HTTP 200 (1234 bytes)
+[12:34:57] INFO [Thread 2] http://example.com -> HTTP 200 (1234 bytes)
+[12:34:58] WARNING [Thread 5] Error: Connection timed out
+[12:35:10] INFO Test completed — Success: 48 | Errors: 2
+```
 
-    Performance benchmarking (with permission)
+## Ethical guidelines
 
-❌ Prohibited Uses
+**Allowed uses**
 
-    Unauthorized testing
+- Testing your own servers and infrastructure
+- Authorized penetration testing engagements
+- Performance benchmarking with explicit permission
 
-    Disruptive attacks
+**Prohibited uses**
 
-    Violating any terms of service
+- Testing systems without explicit authorization
+- Disruptive or denial-of-service attacks
+- Any activity that violates applicable laws or terms of service
+
+## License
+
+MIT License — see [LICENSE](LICENSE) for details.
